@@ -34,6 +34,7 @@ LV_FONT_DECLARE(app_font_24);
 #define APP_QUERY_DAYS 7
 #define APP_REFRESH_INTERVAL_MS (5UL * 60UL * 1000UL)
 #define APP_PULL_REFRESH_THRESHOLD 80
+#define APP_PROFILE_RENDER 1
 
 #define EVENT_START_COLOR 0x6EE7B7
 #define EVENT_END_COLOR 0xFF8A65
@@ -73,11 +74,24 @@ struct AppState {
   bool clockReady = false;
   bool pullRefreshArmed = false;
   bool pullRefreshInProgress = false;
+  bool scrollActive = false;
   unsigned long refreshOverlayShownAt = 0;
   String statusText;
   String detailText;
   String openDetailEventId;
 } app;
+
+#if APP_PROFILE_RENDER
+struct RenderProfileState {
+  uint32_t loopCount = 0;
+  uint32_t flushCount = 0;
+  uint32_t maxLvHandlerUs = 0;
+  uint32_t maxFlushUs = 0;
+  uint64_t totalLvHandlerUs = 0;
+  uint64_t totalFlushUs = 0;
+  unsigned long windowStartedAt = 0;
+} renderProfile;
+#endif
 
 static lv_style_t style_screen;
 static lv_style_t style_day_panel;
@@ -97,6 +111,9 @@ static lv_obj_t *refresh_overlay;
 static lv_obj_t *refresh_label;
 
 void my_disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
+#if APP_PROFILE_RENDER
+  const unsigned long flushStartedAt = micros();
+#endif
   uint32_t w = (area->x2 - area->x1 + 1);
   uint32_t h = (area->y2 - area->y1 + 1);
 
@@ -106,8 +123,53 @@ void my_disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
   gfx->draw16bitRGBBitmap(area->x1, area->y1, (uint16_t *)px_map, w, h);
 #endif
 
+#if APP_PROFILE_RENDER
+  const uint32_t flushElapsedUs = micros() - flushStartedAt;
+  renderProfile.flushCount++;
+  renderProfile.totalFlushUs += flushElapsedUs;
+  if (flushElapsedUs > renderProfile.maxFlushUs) {
+    renderProfile.maxFlushUs = flushElapsedUs;
+  }
+#endif
+
   lv_disp_flush_ready(disp);
 }
+
+#if APP_PROFILE_RENDER
+void reportRenderProfileIfNeeded() {
+  const unsigned long now = millis();
+  if (renderProfile.windowStartedAt == 0) {
+    renderProfile.windowStartedAt = now;
+    return;
+  }
+
+  const unsigned long elapsedMs = now - renderProfile.windowStartedAt;
+  if (elapsedMs < 1000) {
+    return;
+  }
+
+  const uint32_t avgLvHandlerUs = renderProfile.loopCount == 0 ? 0 : renderProfile.totalLvHandlerUs / renderProfile.loopCount;
+  const uint32_t avgFlushUs = renderProfile.flushCount == 0 ? 0 : renderProfile.totalFlushUs / renderProfile.flushCount;
+
+  Serial.printf(
+      "render idle=%d loops=%lu lv_avg_us=%lu lv_max_us=%lu flushes=%lu flush_avg_us=%lu flush_max_us=%lu\n",
+      app.scrollActive ? 0 : 1,
+      static_cast<unsigned long>(renderProfile.loopCount),
+      static_cast<unsigned long>(avgLvHandlerUs),
+      static_cast<unsigned long>(renderProfile.maxLvHandlerUs),
+      static_cast<unsigned long>(renderProfile.flushCount),
+      static_cast<unsigned long>(avgFlushUs),
+      static_cast<unsigned long>(renderProfile.maxFlushUs));
+
+  renderProfile.loopCount = 0;
+  renderProfile.flushCount = 0;
+  renderProfile.maxLvHandlerUs = 0;
+  renderProfile.maxFlushUs = 0;
+  renderProfile.totalLvHandlerUs = 0;
+  renderProfile.totalFlushUs = 0;
+  renderProfile.windowStartedAt = now;
+}
+#endif
 
 void my_touchpad_read(lv_indev_t *indev, lv_indev_data_t *data) {
   if (touch_has_signal() && touch_touched()) {
@@ -407,6 +469,7 @@ void updateBackButtonVisibility() {
 
 void onAgendaScrolled(lv_event_t *e) {
   LV_UNUSED(e);
+  app.scrollActive = true;
 
   if (agenda_panel != nullptr && !app.fetchInProgress && !app.pullRefreshInProgress) {
     const lv_coord_t scrollY = lv_obj_get_scroll_y(agenda_panel);
@@ -429,6 +492,7 @@ void onAgendaScrolled(lv_event_t *e) {
 
 void onAgendaScrollEnd(lv_event_t *e) {
   LV_UNUSED(e);
+  app.scrollActive = false;
 
   if (!app.pullRefreshArmed || agenda_panel == nullptr || app.fetchInProgress || app.pullRefreshInProgress) {
     return;
@@ -454,23 +518,21 @@ void onBackPressed(lv_event_t *e) {
 void initStyles() {
   lv_style_init(&style_screen);
   lv_style_set_bg_color(&style_screen, lv_color_hex(0x07111D));
-  lv_style_set_bg_grad_color(&style_screen, lv_color_hex(0x12233C));
-  lv_style_set_bg_grad_dir(&style_screen, LV_GRAD_DIR_VER);
   lv_style_set_text_color(&style_screen, lv_color_hex(0xF4F7FB));
 
   lv_style_init(&style_day_panel);
-  lv_style_set_bg_color(&style_day_panel, lv_color_hex(0x0F1B2C));
-  lv_style_set_border_width(&style_day_panel, 1);
-  lv_style_set_border_color(&style_day_panel, lv_color_hex(0x223552));
-  lv_style_set_radius(&style_day_panel, 18);
-  lv_style_set_pad_all(&style_day_panel, 14);
+  lv_style_set_bg_opa(&style_day_panel, LV_OPA_TRANSP);
+  lv_style_set_border_width(&style_day_panel, 0);
+  lv_style_set_radius(&style_day_panel, 0);
+  lv_style_set_pad_all(&style_day_panel, 8);
 
   lv_style_init(&style_event_card);
-  lv_style_set_bg_color(&style_event_card, lv_color_hex(0x162741));
+  lv_style_set_bg_color(&style_event_card, lv_color_hex(0x102033));
   lv_style_set_border_width(&style_event_card, 1);
   lv_style_set_border_color(&style_event_card, lv_color_hex(0x2E4B74));
-  lv_style_set_radius(&style_event_card, 16);
-  lv_style_set_pad_all(&style_event_card, 14);
+  lv_style_set_radius(&style_event_card, 0);
+  lv_style_set_pad_hor(&style_event_card, 10);
+  lv_style_set_pad_ver(&style_event_card, 8);
   lv_style_set_text_color(&style_event_card, lv_color_hex(0xF4F7FB));
 
   lv_style_init(&style_modal);
@@ -647,7 +709,7 @@ void addDaySection(lv_obj_t *parent, time_t dayStart) {
   lv_obj_set_height(section, LV_SIZE_CONTENT);
   lv_obj_set_layout(section, LV_LAYOUT_FLEX);
   lv_obj_set_flex_flow(section, LV_FLEX_FLOW_COLUMN);
-  lv_obj_set_style_pad_gap(section, 10, 0);
+  lv_obj_set_style_pad_gap(section, 6, 0);
 
   lv_obj_t *title = lv_label_create(section);
   lv_obj_set_style_text_font(title, &app_font_24, 0);
@@ -678,7 +740,7 @@ void addDaySection(lv_obj_t *parent, time_t dayStart) {
 
     lv_obj_set_layout(button, LV_LAYOUT_FLEX);
     lv_obj_set_flex_flow(button, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_gap(button, 6, 0);
+    lv_obj_set_style_pad_gap(button, 4, 0);
 
     lv_obj_t *metaRow = lv_obj_create(button);
     lv_obj_remove_style_all(metaRow);
@@ -1028,11 +1090,25 @@ void setup() {
 }
 
 void loop() {
+#if APP_PROFILE_RENDER
+  const unsigned long lvHandlerStartedAt = micros();
+#endif
   lv_timer_handler();
+#if APP_PROFILE_RENDER
+  const uint32_t lvHandlerElapsedUs = micros() - lvHandlerStartedAt;
+  renderProfile.loopCount++;
+  renderProfile.totalLvHandlerUs += lvHandlerElapsedUs;
+  if (lvHandlerElapsedUs > renderProfile.maxLvHandlerUs) {
+    renderProfile.maxLvHandlerUs = lvHandlerElapsedUs;
+  }
+#endif
   // Flush once per loop to batch cache writeback instead of flushing every
   // partial draw operation.
   gfx->flush();
   refreshIfNeeded();
   updateRelativeTimesIfNeeded();
+#if APP_PROFILE_RENDER
+  reportRenderProfileIfNeeded();
+#endif
   delay(5);
 }
