@@ -26,6 +26,7 @@ LV_FONT_DECLARE(app_font_24);
 #define TFT_ROTATION LV_DISPLAY_ROTATION_0
 #define TFT_BRIGHTNESS 255
 #define DRAW_BUF_SIZE (TFT_HOR_RES * TFT_VER_RES / 10 * (LV_COLOR_DEPTH / 8))
+// A small RGB bounce buffer removes nearly all idle flicker on this panel.
 #define TFT_BOUNCE_BUFFER_PX (TFT_HOR_RES * 10)
 
 #define APP_EVENT_CAPACITY 96
@@ -967,6 +968,8 @@ void setupDisplay() {
 
   bus = new Arduino_ESP32SPI(GFX_NOT_DEFINED, 39, 48, 47, GFX_NOT_DEFINED);
 
+  // Keep the panel timing at the original board values; the flicker fix comes
+  // from the bounce-buffer/manual-flush path rather than porch retuning.
   Arduino_ESP32RGBPanel *rgbpanel = new Arduino_ESP32RGBPanel(
       18, 17, 16, 21,
       11, 12, 13, 14, 0,
@@ -978,6 +981,8 @@ void setupDisplay() {
       0, 0, TFT_BOUNCE_BUFFER_PX);
 
   gfx = new Arduino_RGB_Display(
+      // Manual flush is intentional: auto flush caused frequent idle flicker
+      // when the RGB panel scanned from PSRAM.
       480, 480, rgbpanel, 0, false,
       bus, GFX_NOT_DEFINED, st7701_4848s040_init_operations, sizeof(st7701_4848s040_init_operations));
 
@@ -1024,6 +1029,8 @@ void setup() {
 
 void loop() {
   lv_timer_handler();
+  // Flush once per loop to batch cache writeback instead of flushing every
+  // partial draw operation.
   gfx->flush();
   refreshIfNeeded();
   updateRelativeTimesIfNeeded();
