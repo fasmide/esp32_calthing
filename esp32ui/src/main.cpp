@@ -26,7 +26,7 @@ LV_FONT_DECLARE(app_font_24);
 #define TFT_ROTATION LV_DISPLAY_ROTATION_0
 #define TFT_BRIGHTNESS 255
 #define DRAW_BUF_SIZE (TFT_HOR_RES * TFT_VER_RES / 10 * (LV_COLOR_DEPTH / 8))
-#define TFT_PCLK_HZ 12000000
+#define TFT_BOUNCE_BUFFER_PX (TFT_HOR_RES * 10)
 
 #define APP_EVENT_CAPACITY 96
 #define APP_EVENT_PAGE_LIMIT 12
@@ -974,7 +974,8 @@ void setupDisplay() {
       4, 5, 6, 7, 15,
       1, 10, 8, 50,
       1, 10, 8, 20,
-      1, TFT_PCLK_HZ);
+      0, GFX_NOT_DEFINED, false,
+      0, 0, TFT_BOUNCE_BUFFER_PX);
 
   gfx = new Arduino_RGB_Display(
       480, 480, rgbpanel, 0, false,
