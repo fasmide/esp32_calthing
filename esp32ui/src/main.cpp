@@ -43,6 +43,7 @@ uint32_t draw_buf[DRAW_BUF_SIZE / 4];
 struct CalendarEvent {
   String id;
   String title;
+  String description;
   String location;
   time_t startTs;
   time_t endTs;
@@ -359,6 +360,10 @@ void showDetailOverlay(const CalendarEvent &event) {
     details += "\n";
     details += event.location;
   }
+  if (!event.description.isEmpty()) {
+    details += "\n\n";
+    details += event.description;
+  }
   details += "\nCreated ";
   details += formatCreatedTimestamp(event.createdTs);
   details += "\n\n";
@@ -503,6 +508,7 @@ bool appendEvents(JsonArray events) {
     CalendarEvent &event = app.events[app.eventCount++];
     event.id = String(item["id"] | "");
     event.title = String(item["title"] | "(untitled)");
+    event.description = String(item["description"] | "");
     event.location = String(item["location"] | "");
     event.startTs = item["start_ts"] | 0;
     event.endTs = item["end_ts"] | event.startTs;

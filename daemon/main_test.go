@@ -6,7 +6,7 @@ import (
 )
 
 func TestParseICSExpandsRecurringEvents(t *testing.T) {
-	icsData := []byte("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:daily-1\r\nDTSTART:20260409T120000Z\r\nDTEND:20260409T123000Z\r\nRRULE:FREQ=DAILY;COUNT=3\r\nSUMMARY:Standup\r\nLOCATION:Room A\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n")
+	icsData := []byte("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:daily-1\r\nDTSTART:20260409T120000Z\r\nDTEND:20260409T123000Z\r\nRRULE:FREQ=DAILY;COUNT=3\r\nSUMMARY:Standup\r\nDESCRIPTION:Daily sync with the team\r\nLOCATION:Room A\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n")
 
 	events, err := parseICS(icsData)
 	if err != nil {
@@ -23,6 +23,9 @@ func TestParseICSExpandsRecurringEvents(t *testing.T) {
 	}
 	if events[0].Location != "Room A" {
 		t.Fatalf("unexpected location: %q", events[0].Location)
+	}
+	if events[0].Description != "Daily sync with the team" {
+		t.Fatalf("unexpected description: %q", events[0].Description)
 	}
 }
 

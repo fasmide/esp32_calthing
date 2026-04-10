@@ -47,6 +47,7 @@ type event struct {
 	ID       string
 	UID      string
 	Title    string
+	Description string
 	Start    time.Time
 	End      time.Time
 	Created  time.Time
@@ -57,6 +58,7 @@ type event struct {
 type eventResponse struct {
 	ID        string `json:"id"`
 	Title     string `json:"title"`
+	Description string `json:"description,omitempty"`
 	StartTS   int64  `json:"start_ts"`
 	EndTS     int64  `json:"end_ts"`
 	CreatedTS int64  `json:"created_ts,omitempty"`
@@ -383,6 +385,7 @@ func (d *daemon) handleEvents(w http.ResponseWriter, r *http.Request) {
 		page = append(page, eventResponse{
 			ID:        evt.ID,
 			Title:     evt.Title,
+			Description: evt.Description,
 			StartTS:   evt.Start.Unix(),
 			EndTS:     evt.End.Unix(),
 			CreatedTS: unixOrZero(evt.Created),
@@ -510,6 +513,7 @@ func expandEvent(component *ics.VEvent, defaultLoc *time.Location) ([]event, err
 	base := event{
 		UID:      uid,
 		Title:    fallback(propValue(component, ics.ComponentPropertySummary), "(untitled)"),
+		Description: propValue(component, ics.ComponentPropertyDescription),
 		Start:    start.UTC(),
 		End:      end.UTC(),
 		Created:  eventCreatedTime(component, defaultLoc),
