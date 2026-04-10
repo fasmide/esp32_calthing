@@ -26,6 +26,7 @@ LV_FONT_DECLARE(app_font_24);
 #define TFT_ROTATION LV_DISPLAY_ROTATION_0
 #define TFT_BRIGHTNESS 255
 #define DRAW_BUF_SIZE (TFT_HOR_RES * TFT_VER_RES / 10 * (LV_COLOR_DEPTH / 8))
+#define TFT_PCLK_HZ 12000000
 
 #define APP_EVENT_CAPACITY 96
 #define APP_EVENT_PAGE_LIMIT 12
@@ -885,6 +886,8 @@ void connectWifi() {
   }
 
   WiFi.mode(WIFI_STA);
+  // RGB panel + PSRAM framebuffers are much more stable with modem sleep disabled.
+  WiFi.setSleep(false);
   WiFi.setAutoReconnect(true);
   WiFi.begin(APP_WIFI_SSID, APP_WIFI_PASSWORD);
   setStatus("Connecting Wi-Fi", true);
@@ -970,10 +973,11 @@ void setupDisplay() {
       8, 20, 3, 46, 9, 10,
       4, 5, 6, 7, 15,
       1, 10, 8, 50,
-      1, 10, 8, 20);
+      1, 10, 8, 20,
+      1, TFT_PCLK_HZ);
 
   gfx = new Arduino_RGB_Display(
-      480, 480, rgbpanel, 0, true,
+      480, 480, rgbpanel, 0, false,
       bus, GFX_NOT_DEFINED, st7701_4848s040_init_operations, sizeof(st7701_4848s040_init_operations));
 
   if (!gfx->begin()) {
@@ -1019,6 +1023,7 @@ void setup() {
 
 void loop() {
   lv_timer_handler();
+  gfx->flush();
   refreshIfNeeded();
   updateRelativeTimesIfNeeded();
   delay(5);
