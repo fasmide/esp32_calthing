@@ -78,6 +78,7 @@ struct AppState {
   bool clockReady = false;
   bool pullRefreshArmed = false;
   bool pullRefreshInProgress = false;
+  bool refreshDeferredToNextLoop = false;
   unsigned long refreshOverlayShownAt = 0;
   String statusText;
   String detailText;
@@ -345,6 +346,10 @@ void setRefreshOverlay(const String &text, bool visible) {
     return;
   }
 
+  if (visible && text.isEmpty()) {
+    visible = false;
+  }
+
   lv_label_set_text(refresh_label, text.c_str());
   if (visible) {
     app.refreshOverlayShownAt = millis();
@@ -473,6 +478,7 @@ void onAgendaScrollEnd(lv_event_t *e) {
   app.pullRefreshArmed = false;
   app.pullRefreshInProgress = true;
   app.refreshRequested = true;
+  app.refreshDeferredToNextLoop = true;
   setStatus("Refreshing source", true);
   setRefreshOverlay("Refreshing calendar...", true);
 }
@@ -941,6 +947,8 @@ void buildUi() {
   refresh_label = lv_label_create(refresh_overlay);
   lv_obj_set_style_text_font(refresh_label, &app_font_20, 0);
   lv_obj_set_style_text_color(refresh_label, lv_color_hex(0xF7FBFF), 0);
+  lv_label_set_long_mode(refresh_label, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(refresh_label, lv_pct(100));
   lv_label_set_text(refresh_label, "Refreshing calendar...");
   lv_obj_center(refresh_label);
 
@@ -988,6 +996,11 @@ void connectWifi() {
 
 void refreshIfNeeded() {
   if (app.fetchInProgress) {
+    return;
+  }
+
+  if (app.refreshDeferredToNextLoop) {
+    app.refreshDeferredToNextLoop = false;
     return;
   }
 
