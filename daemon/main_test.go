@@ -45,3 +45,45 @@ func TestFilterEventsReturnsOverlappingRange(t *testing.T) {
 		t.Fatalf("unexpected events returned: %+v", filtered)
 	}
 }
+
+func TestParseICSRecurringAllDayUsesCalendarLocalDays(t *testing.T) {
+	icsData := []byte("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nX-WR-TIMEZONE:Europe/Copenhagen\r\nBEGIN:VEVENT\r\nUID:allday-1\r\nDTSTART;VALUE=DATE:20260412\r\nDTEND;VALUE=DATE:20260413\r\nRRULE:FREQ=DAILY;COUNT=2\r\nSUMMARY:All day test\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n")
+
+	events, err := parseICS(icsData)
+	if err != nil {
+		t.Fatalf("parseICS returned error: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(events))
+	}
+
+	loc, err := time.LoadLocation("Europe/Copenhagen")
+	if err != nil {
+		t.Fatalf("load location: %v", err)
+	}
+
+	for idx, evt := range events {
+		if !evt.AllDay {
+			t.Fatalf("event %d should be all-day", idx)
+		}
+
+		startLocal := evt.Start.In(loc)
+		endLocal := evt.End.In(loc)
+		if startLocal.Hour() != 0 || startLocal.Minute() != 0 || startLocal.Second() != 0 {
+			t.Fatalf("event %d local start not at midnight: %s", idx, startLocal)
+		}
+		if endLocal.Hour() != 0 || endLocal.Minute() != 0 || endLocal.Second() != 0 {
+			t.Fatalf("event %d local end not at midnight: %s", idx, endLocal)
+		}
+		if endLocal.Sub(startLocal) != 24*time.Hour {
+			t.Fatalf("event %d expected one local day, got %s", idx, endLocal.Sub(startLocal))
+		}
+	}
+
+	if got := events[0].Start.In(loc).Format("2006-01-02"); got != "2026-04-12" {
+		t.Fatalf("unexpected first local day: %s", got)
+	}
+	if got := events[1].Start.In(loc).Format("2006-01-02"); got != "2026-04-13" {
+		t.Fatalf("unexpected second local day: %s", got)
+	}
+}

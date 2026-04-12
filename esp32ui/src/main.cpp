@@ -7,6 +7,8 @@
 #include <HTTPClient.h>
 #include <WiFi.h>
 #include <lvgl.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include <time.h>
 
 #include "app_config.h"
@@ -25,7 +27,7 @@ LV_FONT_DECLARE(app_font_24);
 #define TFT_VER_RES 480
 #define TFT_ROTATION LV_DISPLAY_ROTATION_0
 #define TFT_BRIGHTNESS 255
-#define DRAW_BUF_SIZE (TFT_HOR_RES * TFT_VER_RES / 10 * (LV_COLOR_DEPTH / 8))
+#define FRAMEBUFFER_SIZE (TFT_HOR_RES * TFT_VER_RES * sizeof(uint16_t))
 // A small RGB bounce buffer removes nearly all idle flicker on this panel.
 #define TFT_BOUNCE_BUFFER_PX (TFT_HOR_RES * 10)
 
@@ -34,14 +36,16 @@ LV_FONT_DECLARE(app_font_24);
 #define APP_QUERY_DAYS 7
 #define APP_REFRESH_INTERVAL_MS (5UL * 60UL * 1000UL)
 #define APP_PULL_REFRESH_THRESHOLD 80
-#define APP_PROFILE_RENDER 1
 
 #define EVENT_START_COLOR 0x6EE7B7
 #define EVENT_END_COLOR 0xFF8A65
 
 Arduino_ESP32SPI *bus;
 Arduino_RGB_Display *gfx;
-uint32_t draw_buf[DRAW_BUF_SIZE / 4];
+Arduino_ESP32RGBPanel *rgbpanel;
+uint16_t *framebufferA;
+uint16_t *framebufferB;
+SemaphoreHandle_t displayVsyncSemaphore;
 
 struct CalendarEvent {
   String id;
@@ -74,24 +78,11 @@ struct AppState {
   bool clockReady = false;
   bool pullRefreshArmed = false;
   bool pullRefreshInProgress = false;
-  bool scrollActive = false;
   unsigned long refreshOverlayShownAt = 0;
   String statusText;
   String detailText;
   String openDetailEventId;
 } app;
-
-#if APP_PROFILE_RENDER
-struct RenderProfileState {
-  uint32_t loopCount = 0;
-  uint32_t flushCount = 0;
-  uint32_t maxLvHandlerUs = 0;
-  uint32_t maxFlushUs = 0;
-  uint64_t totalLvHandlerUs = 0;
-  uint64_t totalFlushUs = 0;
-  unsigned long windowStartedAt = 0;
-} renderProfile;
-#endif
 
 static lv_style_t style_screen;
 static lv_style_t style_day_panel;
@@ -111,65 +102,29 @@ static lv_obj_t *refresh_overlay;
 static lv_obj_t *refresh_label;
 
 void my_disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
-#if APP_PROFILE_RENDER
-  const unsigned long flushStartedAt = micros();
-#endif
-  uint32_t w = (area->x2 - area->x1 + 1);
-  uint32_t h = (area->y2 - area->y1 + 1);
-
-#if (LV_COLOR_16_SWAP != 0)
-  gfx->draw16bitBeRGBBitmap(area->x1, area->y1, (uint16_t *)px_map, w, h);
-#else
-  gfx->draw16bitRGBBitmap(area->x1, area->y1, (uint16_t *)px_map, w, h);
-#endif
-
-#if APP_PROFILE_RENDER
-  const uint32_t flushElapsedUs = micros() - flushStartedAt;
-  renderProfile.flushCount++;
-  renderProfile.totalFlushUs += flushElapsedUs;
-  if (flushElapsedUs > renderProfile.maxFlushUs) {
-    renderProfile.maxFlushUs = flushElapsedUs;
+  LV_UNUSED(area);
+  // In direct mode LVGL renders into the inactive full-screen buffer. Only swap
+  // on the last flush of a frame, and only after the next VSYNC.
+  if (lv_display_flush_is_last(disp)) {
+    if (displayVsyncSemaphore != nullptr) {
+      xSemaphoreTake(displayVsyncSemaphore, portMAX_DELAY);
+    }
+    rgbpanel->drawBitmap(0, 0, TFT_HOR_RES, TFT_VER_RES, px_map);
   }
-#endif
 
   lv_disp_flush_ready(disp);
 }
 
-#if APP_PROFILE_RENDER
-void reportRenderProfileIfNeeded() {
-  const unsigned long now = millis();
-  if (renderProfile.windowStartedAt == 0) {
-    renderProfile.windowStartedAt = now;
-    return;
+bool onRgbVsync(esp_lcd_panel_handle_t panel, const esp_lcd_rgb_panel_event_data_t *edata, void *user_ctx) {
+  LV_UNUSED(panel);
+  LV_UNUSED(edata);
+  BaseType_t highTaskWoken = pdFALSE;
+  SemaphoreHandle_t semaphore = static_cast<SemaphoreHandle_t>(user_ctx);
+  if (semaphore != nullptr) {
+    xSemaphoreGiveFromISR(semaphore, &highTaskWoken);
   }
-
-  const unsigned long elapsedMs = now - renderProfile.windowStartedAt;
-  if (elapsedMs < 1000) {
-    return;
-  }
-
-  const uint32_t avgLvHandlerUs = renderProfile.loopCount == 0 ? 0 : renderProfile.totalLvHandlerUs / renderProfile.loopCount;
-  const uint32_t avgFlushUs = renderProfile.flushCount == 0 ? 0 : renderProfile.totalFlushUs / renderProfile.flushCount;
-
-  Serial.printf(
-      "render idle=%d loops=%lu lv_avg_us=%lu lv_max_us=%lu flushes=%lu flush_avg_us=%lu flush_max_us=%lu\n",
-      app.scrollActive ? 0 : 1,
-      static_cast<unsigned long>(renderProfile.loopCount),
-      static_cast<unsigned long>(avgLvHandlerUs),
-      static_cast<unsigned long>(renderProfile.maxLvHandlerUs),
-      static_cast<unsigned long>(renderProfile.flushCount),
-      static_cast<unsigned long>(avgFlushUs),
-      static_cast<unsigned long>(renderProfile.maxFlushUs));
-
-  renderProfile.loopCount = 0;
-  renderProfile.flushCount = 0;
-  renderProfile.maxLvHandlerUs = 0;
-  renderProfile.maxFlushUs = 0;
-  renderProfile.totalLvHandlerUs = 0;
-  renderProfile.totalFlushUs = 0;
-  renderProfile.windowStartedAt = now;
+  return highTaskWoken == pdTRUE;
 }
-#endif
 
 void my_touchpad_read(lv_indev_t *indev, lv_indev_data_t *data) {
   if (touch_has_signal() && touch_touched()) {
@@ -243,6 +198,15 @@ String formatDaySubtitle(time_t value) {
 
   char buffer[48];
   strftime(buffer, sizeof(buffer), "%d %b %Y", &parts);
+  return String(buffer);
+}
+
+String formatCurrentTime(time_t value) {
+  struct tm parts;
+  localtime_r(&value, &parts);
+
+  char buffer[16];
+  strftime(buffer, sizeof(buffer), "%H:%M", &parts);
   return String(buffer);
 }
 
@@ -358,6 +322,11 @@ String formatCreatedTimestamp(time_t value) {
 }
 
 void setStatus(const String &text, bool visible) {
+  const bool currentlyVisible = status_pill != nullptr && !lv_obj_has_flag(status_pill, LV_OBJ_FLAG_HIDDEN);
+  if (app.statusText == text && currentlyVisible == visible) {
+    return;
+  }
+
   app.statusText = text;
   if (status_label != nullptr) {
     lv_label_set_text(status_label, app.statusText.c_str());
@@ -458,8 +427,13 @@ void updateBackButtonVisibility() {
     return;
   }
 
-  lv_coord_t scrollY = lv_obj_get_scroll_y(agenda_panel);
-  if (scrollY > 80) {
+  const bool shouldShow = lv_obj_get_scroll_y(agenda_panel) > 80;
+  const bool isHidden = lv_obj_has_flag(back_button, LV_OBJ_FLAG_HIDDEN);
+  if (shouldShow == !isHidden) {
+    return;
+  }
+
+  if (shouldShow) {
     lv_obj_clear_flag(back_button, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(back_button);
   } else {
@@ -469,7 +443,6 @@ void updateBackButtonVisibility() {
 
 void onAgendaScrolled(lv_event_t *e) {
   LV_UNUSED(e);
-  app.scrollActive = true;
 
   if (agenda_panel != nullptr && !app.fetchInProgress && !app.pullRefreshInProgress) {
     const lv_coord_t scrollY = lv_obj_get_scroll_y(agenda_panel);
@@ -492,7 +465,6 @@ void onAgendaScrolled(lv_event_t *e) {
 
 void onAgendaScrollEnd(lv_event_t *e) {
   LV_UNUSED(e);
-  app.scrollActive = false;
 
   if (!app.pullRefreshArmed || agenda_panel == nullptr || app.fetchInProgress || app.pullRefreshInProgress) {
     return;
@@ -711,15 +683,40 @@ void addDaySection(lv_obj_t *parent, time_t dayStart) {
   lv_obj_set_flex_flow(section, LV_FLEX_FLOW_COLUMN);
   lv_obj_set_style_pad_gap(section, 6, 0);
 
-  lv_obj_t *title = lv_label_create(section);
+  lv_obj_t *titleRow = lv_obj_create(section);
+  lv_obj_remove_style_all(titleRow);
+  lv_obj_set_width(titleRow, lv_pct(100));
+  lv_obj_set_height(titleRow, LV_SIZE_CONTENT);
+  lv_obj_set_layout(titleRow, LV_LAYOUT_FLEX);
+  lv_obj_set_flex_flow(titleRow, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(titleRow, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+  lv_obj_t *title = lv_label_create(titleRow);
   lv_obj_set_style_text_font(title, &app_font_24, 0);
   lv_obj_set_style_text_color(title, lv_color_hex(0xF7FBFF), 0);
   lv_label_set_text(title, formatDayTitle(dayStart).c_str());
 
-  lv_obj_t *subtitle = lv_label_create(section);
+  lv_obj_t *subtitleRow = lv_obj_create(section);
+  lv_obj_remove_style_all(subtitleRow);
+  lv_obj_set_width(subtitleRow, lv_pct(100));
+  lv_obj_set_height(subtitleRow, LV_SIZE_CONTENT);
+  lv_obj_set_layout(subtitleRow, LV_LAYOUT_FLEX);
+  lv_obj_set_flex_flow(subtitleRow, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(subtitleRow, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+  lv_obj_t *subtitle = lv_label_create(subtitleRow);
   lv_obj_set_style_text_font(subtitle, &app_font_14, 0);
   lv_obj_set_style_text_color(subtitle, lv_color_hex(0x9EB1CB), 0);
   lv_label_set_text(subtitle, formatDaySubtitle(dayStart).c_str());
+
+  if (dayStart == app.rangeStart) {
+    const time_t now = time(nullptr);
+
+    lv_obj_t *clockLabel = lv_label_create(titleRow);
+    lv_obj_set_style_text_font(clockLabel, &app_font_24, 0);
+    lv_obj_set_style_text_color(clockLabel, lv_color_hex(0x9EB1CB), 0);
+    lv_label_set_text(clockLabel, formatCurrentTime(now).c_str());
+  }
 
   bool foundEvents = false;
   const time_t dayEnd = dayStart + 24 * 60 * 60;
@@ -833,12 +830,20 @@ void rebuildAgenda(bool preserveView = false) {
 }
 
 void updateRelativeTimesIfNeeded() {
-  if (app.eventCount == 0) {
+  const time_t now = time(nullptr);
+  if (now < 1700000000) {
     return;
   }
 
-  const time_t now = time(nullptr);
-  if (now < 1700000000) {
+  const time_t currentDayStart = startOfLocalDay(now);
+  if (currentDayStart != app.rangeStart) {
+    app.rangeStart = currentDayStart;
+    app.rangeEnd = app.rangeStart + (APP_QUERY_DAYS * 24 * 60 * 60);
+    app.refreshRequested = true;
+    rebuildAgenda(true);
+  }
+
+  if (app.eventCount == 0) {
     return;
   }
 
@@ -1032,7 +1037,7 @@ void setupDisplay() {
 
   // Keep the panel timing at the original board values; the flicker fix comes
   // from the bounce-buffer/manual-flush path rather than porch retuning.
-  Arduino_ESP32RGBPanel *rgbpanel = new Arduino_ESP32RGBPanel(
+  rgbpanel = new Arduino_ESP32RGBPanel(
       18, 17, 16, 21,
       11, 12, 13, 14, 0,
       8, 20, 3, 46, 9, 10,
@@ -1040,7 +1045,7 @@ void setupDisplay() {
       1, 10, 8, 50,
       1, 10, 8, 20,
       0, GFX_NOT_DEFINED, false,
-      0, 0, TFT_BOUNCE_BUFFER_PX);
+      0, 0, TFT_BOUNCE_BUFFER_PX, 2);
 
   gfx = new Arduino_RGB_Display(
       // Manual flush is intentional: auto flush caused frequent idle flicker
@@ -1050,6 +1055,21 @@ void setupDisplay() {
 
   if (!gfx->begin()) {
     Serial.println("gfx->begin() failed");
+  }
+
+  framebufferA = rgbpanel->getFrameBufferByIndex(0);
+  framebufferB = rgbpanel->getFrameBufferByIndex(1);
+  if (framebufferA == nullptr || framebufferB == nullptr) {
+    Serial.println("rgbpanel framebuffers unavailable");
+  }
+
+  displayVsyncSemaphore = xSemaphoreCreateBinary();
+  if (displayVsyncSemaphore == nullptr) {
+    Serial.println("displayVsyncSemaphore create failed");
+  } else {
+    esp_lcd_rgb_panel_event_callbacks_t callbacks = {};
+    callbacks.on_vsync = onRgbVsync;
+    rgbpanel->registerEventCallbacks(&callbacks, displayVsyncSemaphore);
   }
 
   pinMode(GFX_BL, OUTPUT);
@@ -1066,7 +1086,7 @@ void setupLvgl() {
 
   lv_display_t *disp = lv_display_create(TFT_HOR_RES, TFT_VER_RES);
   lv_display_set_flush_cb(disp, my_disp_flush);
-  lv_display_set_buffers(disp, draw_buf, nullptr, sizeof(draw_buf), LV_DISPLAY_RENDER_MODE_PARTIAL);
+  lv_display_set_buffers(disp, framebufferA, framebufferB, FRAMEBUFFER_SIZE, LV_DISPLAY_RENDER_MODE_DIRECT);
   lv_display_set_rotation(disp, TFT_ROTATION);
 
   lv_indev_t *indev = lv_indev_create();
@@ -1090,25 +1110,8 @@ void setup() {
 }
 
 void loop() {
-#if APP_PROFILE_RENDER
-  const unsigned long lvHandlerStartedAt = micros();
-#endif
   lv_timer_handler();
-#if APP_PROFILE_RENDER
-  const uint32_t lvHandlerElapsedUs = micros() - lvHandlerStartedAt;
-  renderProfile.loopCount++;
-  renderProfile.totalLvHandlerUs += lvHandlerElapsedUs;
-  if (lvHandlerElapsedUs > renderProfile.maxLvHandlerUs) {
-    renderProfile.maxLvHandlerUs = lvHandlerElapsedUs;
-  }
-#endif
-  // Flush once per loop to batch cache writeback instead of flushing every
-  // partial draw operation.
-  gfx->flush();
   refreshIfNeeded();
   updateRelativeTimesIfNeeded();
-#if APP_PROFILE_RENDER
-  reportRenderProfileIfNeeded();
-#endif
   delay(5);
 }

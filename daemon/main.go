@@ -55,6 +55,13 @@ type event struct {
 	Location string
 }
 
+type parsedTime struct {
+	Time     time.Time
+	AllDay   bool
+	Absolute bool
+	Location *time.Location
+}
+
 type eventResponse struct {
 	ID        string `json:"id"`
 	Title     string `json:"title"`
@@ -500,12 +507,12 @@ func expandEvent(component *ics.VEvent, defaultLoc *time.Location) ([]event, err
 		uid = hashBytes([]byte(component.Serialize(nil)))
 	}
 
-	start, startAllDay, err := parseICalTime(component.GetProperty(ics.ComponentPropertyDtStart), defaultLoc)
+	start, err := parseICalTime(component.GetProperty(ics.ComponentPropertyDtStart), defaultLoc)
 	if err != nil {
 		return nil, fmt.Errorf("parse DTSTART for %s: %w", uid, err)
 	}
 
-	end, err := parseEventEnd(component, start, startAllDay, defaultLoc)
+	end, err := parseEventEnd(component, start, defaultLoc)
 	if err != nil {
 		return nil, fmt.Errorf("parse end for %s: %w", uid, err)
 	}
@@ -514,10 +521,10 @@ func expandEvent(component *ics.VEvent, defaultLoc *time.Location) ([]event, err
 		UID:      uid,
 		Title:    fallback(propValue(component, ics.ComponentPropertySummary), "(untitled)"),
 		Description: propValue(component, ics.ComponentPropertyDescription),
-		Start:    start.UTC(),
-		End:      end.UTC(),
+		Start:    start.Time.UTC(),
+		End:      end.Time.UTC(),
 		Created:  eventCreatedTime(component, defaultLoc),
-		AllDay:   startAllDay,
+		AllDay:   start.AllDay,
 		Location: propValue(component, ics.ComponentPropertyLocation),
 	}
 
@@ -527,49 +534,53 @@ func expandEvent(component *ics.VEvent, defaultLoc *time.Location) ([]event, err
 		return []event{base}, nil
 	}
 
-	occurrences, err := expandRecurring(component, base, defaultLoc)
+	occurrences, err := expandRecurring(component, base, start, end, defaultLoc)
 	if err != nil {
 		return nil, err
 	}
 	return occurrences, nil
 }
 
-func expandRecurring(component *ics.VEvent, base event, defaultLoc *time.Location) ([]event, error) {
+func expandRecurring(component *ics.VEvent, base event, start parsedTime, end parsedTime, defaultLoc *time.Location) ([]event, error) {
 	ruleText := propValue(component, ics.ComponentPropertyRrule)
 	options, err := rrule.StrToROption(ruleText)
 	if err != nil {
 		return nil, err
 	}
-	options.Dtstart = base.Start
+	options.Dtstart = recurrenceStart(start)
 
 	rule, err := rrule.NewRRule(*options)
 	if err != nil {
 		return nil, err
 	}
 
-	windowStart := time.Now().UTC().AddDate(-1, 0, 0)
-	windowEnd := time.Now().UTC().AddDate(2, 0, 0)
-	if !base.Start.Before(windowStart) {
-		windowStart = base.Start.Add(-24 * time.Hour)
+	windowStart := time.Now().In(options.Dtstart.Location()).AddDate(-1, 0, 0)
+	windowEnd := time.Now().In(options.Dtstart.Location()).AddDate(2, 0, 0)
+	if !options.Dtstart.Before(windowStart) {
+		windowStart = options.Dtstart.Add(-24 * time.Hour)
 	}
 
-	duration := base.End.Sub(base.Start)
+	duration := end.Time.Sub(start.Time)
 	if duration <= 0 {
 		duration = time.Minute
 	}
+	allDaySpanDays := allDayDurationDays(start, end)
 
 	exclusions := parseExdates(component, defaultLoc)
 	instances := rule.Between(windowStart, windowEnd, true)
 	occurrences := make([]event, 0, len(instances))
 	for idx, instanceStart := range instances {
-		instanceStart = instanceStart.UTC()
-		if exclusions[instanceStart.Unix()] {
+		if exclusions[instanceStart.UTC().Unix()] {
 			continue
 		}
 
 		occurrence := base
-		occurrence.Start = instanceStart
-		occurrence.End = instanceStart.Add(duration)
+		occurrence.Start = instanceStart.UTC()
+		if start.AllDay {
+			occurrence.End = instanceStart.AddDate(0, 0, allDaySpanDays).UTC()
+		} else {
+			occurrence.End = instanceStart.Add(duration).UTC()
+		}
 		occurrence.ID = fmt.Sprintf("%s#%d", base.UID, idx)
 		occurrences = append(occurrences, occurrence)
 	}
@@ -590,40 +601,50 @@ func parseExdates(component *ics.VEvent, defaultLoc *time.Location) map[int64]bo
 			}
 			clone := prop
 			clone.Value = trimmed
-			parsed, _, err := parseICalTime(&clone, defaultLoc)
+			parsed, err := parseICalTime(&clone, defaultLoc)
 			if err == nil {
-				result[parsed.UTC().Unix()] = true
+				result[parsed.Time.UTC().Unix()] = true
 			}
 		}
 	}
 	return result
 }
 
-func parseEventEnd(component *ics.VEvent, start time.Time, allDay bool, defaultLoc *time.Location) (time.Time, error) {
+func parseEventEnd(component *ics.VEvent, start parsedTime, defaultLoc *time.Location) (parsedTime, error) {
 	if prop := component.GetProperty(ics.ComponentPropertyDtEnd); prop != nil {
-		end, _, err := parseICalTime(prop, defaultLoc)
+		end, err := parseICalTime(prop, defaultLoc)
 		return end, err
 	}
 	if prop := component.GetProperty(ics.ComponentPropertyDuration); prop != nil {
 		duration, err := time.ParseDuration(prop.Value)
 		if err == nil {
-			return start.Add(duration), nil
+			return parsedTime{
+				Time:     start.Time.Add(duration),
+				AllDay:   start.AllDay,
+				Absolute: start.Absolute,
+				Location: start.Location,
+			}, nil
 		}
 	}
-	if allDay {
-		return start.Add(24 * time.Hour), nil
+	if start.AllDay {
+		return parsedTime{
+			Time:     start.Time.In(start.Location).AddDate(0, 0, 1),
+			AllDay:   true,
+			Absolute: false,
+			Location: start.Location,
+		}, nil
 	}
 	return start, nil
 }
 
-func parseICalTime(prop *ics.IANAProperty, defaultLoc *time.Location) (time.Time, bool, error) {
+func parseICalTime(prop *ics.IANAProperty, defaultLoc *time.Location) (parsedTime, error) {
 	if prop == nil {
-		return time.Time{}, false, errors.New("missing property")
+		return parsedTime{}, errors.New("missing property")
 	}
 
 	value := strings.TrimSpace(prop.Value)
 	if value == "" {
-		return time.Time{}, false, errors.New("empty value")
+		return parsedTime{}, errors.New("empty value")
 	}
 
 	params := normalizeParams(prop.ICalParameters)
@@ -634,9 +655,9 @@ func parseICalTime(prop *ics.IANAProperty, defaultLoc *time.Location) (time.Time
 		}
 		parsed, err := time.ParseInLocation("20060102", value, loc)
 		if err != nil {
-			return time.Time{}, true, err
+			return parsedTime{}, err
 		}
-		return parsed.UTC(), true, nil
+		return parsedTime{Time: parsed.UTC(), AllDay: true, Absolute: false, Location: loc}, nil
 	}
 
 	loc := defaultLoc
@@ -653,16 +674,39 @@ func parseICalTime(prop *ics.IANAProperty, defaultLoc *time.Location) (time.Time
 	if strings.HasSuffix(value, "Z") {
 		parsed, err := time.Parse("20060102T150405Z", value)
 		if err != nil {
-			return time.Time{}, false, err
+			return parsedTime{}, err
 		}
-		return parsed.UTC(), false, nil
+		return parsedTime{Time: parsed.UTC(), AllDay: false, Absolute: true, Location: time.UTC}, nil
 	}
 
 	parsed, err := time.ParseInLocation("20060102T150405", value, loc)
 	if err != nil {
-		return time.Time{}, false, err
+		return parsedTime{}, err
 	}
-	return parsed.UTC(), false, nil
+	return parsedTime{Time: parsed.UTC(), AllDay: false, Absolute: false, Location: loc}, nil
+}
+
+func recurrenceStart(start parsedTime) time.Time {
+	if start.Absolute {
+		return start.Time.UTC()
+	}
+	return start.Time.In(start.Location)
+}
+
+func allDayDurationDays(start parsedTime, end parsedTime) int {
+	if !start.AllDay || start.Location == nil || end.Location == nil {
+		return 1
+	}
+
+	startLocal := start.Time.In(start.Location)
+	endLocal := end.Time.In(end.Location)
+	startDate := time.Date(startLocal.Year(), startLocal.Month(), startLocal.Day(), 0, 0, 0, 0, time.UTC)
+	endDate := time.Date(endLocal.Year(), endLocal.Month(), endLocal.Day(), 0, 0, 0, 0, time.UTC)
+	days := int(endDate.Sub(startDate) / (24 * time.Hour))
+	if days < 1 {
+		return 1
+	}
+	return days
 }
 
 func normalizeParams(params map[string][]string) map[string]string {
@@ -710,13 +754,13 @@ func dayStartUTC(t time.Time) time.Time {
 
 func eventCreatedTime(component *ics.VEvent, defaultLoc *time.Location) time.Time {
 	if prop := component.GetProperty(ics.ComponentPropertyCreated); prop != nil {
-		if created, _, err := parseICalTime(prop, defaultLoc); err == nil {
-			return created.UTC()
+		if created, err := parseICalTime(prop, defaultLoc); err == nil {
+			return created.Time.UTC()
 		}
 	}
 	if prop := component.GetProperty(ics.ComponentPropertyDtstamp); prop != nil {
-		if stamp, _, err := parseICalTime(prop, defaultLoc); err == nil {
-			return stamp.UTC()
+		if stamp, err := parseICalTime(prop, defaultLoc); err == nil {
+			return stamp.Time.UTC()
 		}
 	}
 	return time.Time{}
