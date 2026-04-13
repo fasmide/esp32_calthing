@@ -202,6 +202,8 @@ String formatDaySubtitle(time_t value) {
   return String(buffer);
 }
 
+String formatRelativeDuration(time_t seconds);
+
 String formatCurrentTime(time_t value) {
   struct tm parts;
   localtime_r(&value, &parts);
@@ -226,7 +228,7 @@ String formatTimeRange(const CalendarEvent &event) {
   strftime(startBuffer, sizeof(startBuffer), "%H:%M", &startParts);
   strftime(endBuffer, sizeof(endBuffer), "%H:%M", &endParts);
 
-  return String(startBuffer) + " - " + endBuffer;
+  return String(startBuffer) + " - " + endBuffer + " (" + formatRelativeDuration(event.endTs - event.startTs) + ")";
 }
 
 String formatRelativeDuration(time_t seconds) {
