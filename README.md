@@ -17,7 +17,7 @@ The daemon downloads that feed, expands recurring events, normalizes time handli
 
 The UI targets an ESP32-S3 RGB touchscreen panel.
 
-This repo has been developed and tested with a `480x480` ESP32-S3 display using:
+This repo has been developed and tested with a `Guition ESP32-S3-4848S040`, a `480x480` ESP32-S3 display using:
 
 - RGB LCD panel driven by the ESP32-S3 RGB peripheral
 - GT911 touch controller
@@ -25,7 +25,7 @@ This repo has been developed and tested with a `480x480` ESP32-S3 display using:
 
 ## Demo
 
-Add demo video here.
+[Demo video](https://github.com/user-attachments/assets/5447b737-296b-42ea-8eba-ae6e0fbb3401)
 
 ## License
 
