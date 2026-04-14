@@ -7,7 +7,7 @@ Small Go daemon that downloads an iCalendar feed, keeps a parsed cache in memory
 - `ICAL_URL` (required): HTTP(S) URL to the `.ics` feed
 - `API_TOKEN` (required): shared bearer token for UI access
 - `LISTEN_ADDR` (optional): bind address, default `:8090`
-- `REFRESH_INTERVAL` (optional): how often the feed is refreshed, default `15m`
+- `REFRESH_INTERVAL` (optional): how often the feed is refreshed, default `2h`
 - `HTTP_TIMEOUT` (optional): timeout for feed downloads, default `20s`
 - `DEFAULT_QUERY_DAYS` (optional): default `/v1/events` window size, default `7`
 - `MAX_WINDOW_DAYS` (optional): maximum allowed query window, default `31`
@@ -15,7 +15,7 @@ Small Go daemon that downloads an iCalendar feed, keeps a parsed cache in memory
 ## Run
 
 ```bash
-cd /work/esp32_calthing/daemon
+cd /work/daemon
 ICAL_URL="https://example.com/calendar.ics" API_TOKEN="replace-with-random-secret" go run .
 ```
 

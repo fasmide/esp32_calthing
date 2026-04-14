@@ -11,7 +11,11 @@
 #include <freertos/semphr.h>
 #include <time.h>
 
+#if __has_include("app_config.h")
 #include "app_config.h"
+#else
+#include "app_config.example.h"
+#endif
 #include "touch.h"
 
 LV_FONT_DECLARE(app_font_14);
