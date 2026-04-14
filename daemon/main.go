@@ -24,7 +24,7 @@ import (
 
 const (
 	defaultListenAddr     = ":8090"
-	defaultRefresh        = 15 * time.Minute
+	defaultRefresh        = 2 * time.Hour
 	defaultHTTPTimeout    = 20 * time.Second
 	defaultQueryDays      = 7
 	defaultLimit          = 20
