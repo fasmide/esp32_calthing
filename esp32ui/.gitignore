@@ -34,3 +34,4 @@
 .pio/
 .vscode/
 docs/
+include/app_config.h
