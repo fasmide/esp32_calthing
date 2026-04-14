@@ -27,6 +27,10 @@ This repo has been developed and tested with a `480x480` ESP32-S3 display using:
 
 Add demo video here.
 
+## License
+
+This project is released under the `Unlicense`. See `LICENSE`.
+
 ## Run
 
 Daemon:
