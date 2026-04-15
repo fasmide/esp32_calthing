@@ -6,6 +6,7 @@
 #include <ESP32_4848S040.h>
 #include <HTTPClient.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <lvgl.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -148,6 +149,14 @@ static uint32_t my_tick(void) {
 
 bool hasAppConfig() {
   return strlen(APP_WIFI_SSID) > 0 && strlen(APP_DAEMON_URL) > 0 && strlen(APP_API_TOKEN) > 0;
+}
+
+String daemonBaseUrl() {
+  String baseUrl = String(APP_DAEMON_URL);
+  while (baseUrl.endsWith("/")) {
+    baseUrl.remove(baseUrl.length() - 1);
+  }
+  return baseUrl;
 }
 
 String urlEncode(const String &value) {
@@ -582,14 +591,17 @@ bool fetchAgendaWindow() {
   int pageCount = 0;
 
   do {
-    String url = String(APP_DAEMON_URL) + "/v1/events?from=" + urlEncode(formatRfc3339(app.rangeStart));
+    String url = daemonBaseUrl() + "/v1/events?from=" + urlEncode(formatRfc3339(app.rangeStart));
     url += "&to=" + urlEncode(formatRfc3339(app.rangeEnd));
     url += "&limit=" + String(APP_EVENT_PAGE_LIMIT);
     if (nextCursor.length() > 0) {
       url += "&cursor=" + urlEncode(nextCursor);
     }
 
-    WiFiClient client;
+    Serial.println("GET " + url);
+
+    WiFiClientSecure client;
+    client.setCACert(APP_DAEMON_CA_CERT);
     HTTPClient http;
     http.setConnectTimeout(8000);
     http.setTimeout(12000);
@@ -606,6 +618,7 @@ bool fetchAgendaWindow() {
     const int httpCode = http.GET();
     if (httpCode != HTTP_CODE_OK) {
       String errorText = http.errorToString(httpCode);
+      Serial.printf("Fetch failed code=%d error=%s\n", httpCode, errorText.c_str());
       http.end();
       setStatus("Fetch failed: " + errorText, true);
       setRefreshOverlay("", false);
@@ -660,12 +673,14 @@ bool triggerDaemonRefresh() {
     return false;
   }
 
-  WiFiClient client;
+  WiFiClientSecure client;
+  client.setCACert(APP_DAEMON_CA_CERT);
   HTTPClient http;
   http.setConnectTimeout(8000);
   http.setTimeout(20000);
 
-  const String url = String(APP_DAEMON_URL) + "/v1/refresh";
+  const String url = daemonBaseUrl() + "/v1/refresh";
+  Serial.println("POST " + url);
   if (!http.begin(client, url)) {
     setStatus("Refresh setup failed", true);
     setRefreshOverlay("", false);
@@ -676,6 +691,7 @@ bool triggerDaemonRefresh() {
   const int httpCode = http.POST("");
   if (httpCode != HTTP_CODE_OK) {
     const String errorText = http.errorToString(httpCode);
+    Serial.printf("Refresh failed code=%d error=%s\n", httpCode, errorText.c_str());
     http.end();
     setStatus("Refresh failed: " + errorText, true);
     setRefreshOverlay("", false);
@@ -1026,6 +1042,15 @@ void refreshIfNeeded() {
 
   if (!app.wifiReady) {
     return;
+  }
+
+  const time_t now = time(nullptr);
+  if (!app.clockReady && now >= 1700000000) {
+    app.clockReady = true;
+    app.rangeStart = startOfLocalDay(now);
+    app.rangeEnd = app.rangeStart + (APP_QUERY_DAYS * 24 * 60 * 60);
+    app.refreshRequested = true;
+    Serial.printf("Clock synchronized at %lld\n", static_cast<long long>(now));
   }
 
   const bool stale = millis() - app.lastRefreshMs > APP_REFRESH_INTERVAL_MS;

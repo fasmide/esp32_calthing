@@ -6,3 +6,10 @@
 #define APP_DAEMON_URL "http://192.168.1.100:8090"
 #define APP_API_TOKEN "replace-with-daemon-token"
 #define APP_TIMEZONE "CET-1CEST,M3.5.0/2,M10.5.0/3"
+
+// Optional PEM CA root used to validate an HTTPS daemon endpoint.
+// Leave undefined for plain HTTP, or paste a single PEM certificate string.
+// #define APP_DAEMON_CA_CERT \
+//   "-----BEGIN CERTIFICATE-----\n" \
+//   "...\n" \
+//   "-----END CERTIFICATE-----\n"
