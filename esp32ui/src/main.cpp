@@ -19,6 +19,8 @@
 #endif
 #include "touch.h"
 
+SET_LOOP_TASK_STACK_SIZE(16 * 1024);
+
 LV_FONT_DECLARE(app_font_14);
 LV_FONT_DECLARE(app_font_16);
 LV_FONT_DECLARE(app_font_20);
