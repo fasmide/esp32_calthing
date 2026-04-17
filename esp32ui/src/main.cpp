@@ -10,6 +10,7 @@
 #include <lvgl.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include <sys/time.h>
 #include <time.h>
 
 #if __has_include("app_config.h")
@@ -43,6 +44,7 @@ LV_FONT_DECLARE(app_font_24);
 #define APP_QUERY_DAYS 7
 #define APP_REFRESH_INTERVAL_MS (5UL * 60UL * 1000UL)
 #define APP_PULL_REFRESH_THRESHOLD 80
+#define APP_NTP_RETRY_INTERVAL_MS 30000UL
 
 #define EVENT_START_COLOR 0x6EE7B7
 #define EVENT_END_COLOR 0xFF8A65
@@ -87,6 +89,7 @@ struct AppState {
   bool pullRefreshInProgress = false;
   bool refreshDeferredToNextLoop = false;
   unsigned long refreshOverlayShownAt = 0;
+  unsigned long lastClockSyncAttemptMs = 0;
   String statusText;
   String detailText;
   String openDetailEventId;
@@ -159,6 +162,83 @@ String daemonBaseUrl() {
     baseUrl.remove(baseUrl.length() - 1);
   }
   return baseUrl;
+}
+
+bool isClockValid(time_t now) {
+  return now >= 1700000000;
+}
+
+void requestTimeSync() {
+  configTzTime(APP_TIMEZONE, "pool.ntp.org", "time.nist.gov");
+  app.lastClockSyncAttemptMs = millis();
+}
+
+time_t buildTimestampUtc() {
+  static const char *months = "JanFebMarAprMayJunJulAugSepOctNovDec";
+  char monthText[4] = {};
+  int day = 0;
+  int year = 0;
+  int hour = 0;
+  int minute = 0;
+  int second = 0;
+
+  if (sscanf(__DATE__, "%3s %d %d", monthText, &day, &year) != 3) {
+    return 0;
+  }
+  if (sscanf(__TIME__, "%d:%d:%d", &hour, &minute, &second) != 3) {
+    return 0;
+  }
+
+  const char *monthPos = strstr(months, monthText);
+  if (monthPos == nullptr) {
+    return 0;
+  }
+
+  struct tm parts = {};
+  parts.tm_year = year - 1900;
+  parts.tm_mon = static_cast<int>((monthPos - months) / 3);
+  parts.tm_mday = day;
+  parts.tm_hour = hour;
+  parts.tm_min = minute;
+  parts.tm_sec = second;
+  parts.tm_isdst = 0;
+
+  const char *previousTz = getenv("TZ");
+  setenv("TZ", "UTC0", 1);
+  tzset();
+  const time_t timestamp = mktime(&parts);
+  if (previousTz != nullptr) {
+    setenv("TZ", previousTz, 1);
+  } else {
+    unsetenv("TZ");
+  }
+  tzset();
+  return timestamp;
+}
+
+bool bootstrapClockFromBuildTime() {
+  if (isClockValid(time(nullptr))) {
+    Serial.printf("Clock already valid: %lld\n", static_cast<long long>(time(nullptr)));
+    return true;
+  }
+
+  const time_t buildTime = buildTimestampUtc();
+  Serial.printf("Build timestamp UTC: %lld\n", static_cast<long long>(buildTime));
+  if (!isClockValid(buildTime)) {
+    Serial.println("Build timestamp invalid");
+    return false;
+  }
+
+  timeval now = {};
+  now.tv_sec = buildTime;
+  now.tv_usec = 0;
+  if (settimeofday(&now, nullptr) != 0) {
+    Serial.println("settimeofday failed");
+    return false;
+  }
+
+  Serial.printf("Clock after bootstrap: %lld\n", static_cast<long long>(time(nullptr)));
+  return isClockValid(time(nullptr));
 }
 
 String urlEncode(const String &value) {
@@ -584,11 +664,19 @@ bool fetchAgendaWindow() {
     return false;
   }
 
+  if (!app.clockReady || !isClockValid(time(nullptr))) {
+    Serial.printf("Fetch blocked, invalid clock: %lld clockReady=%d\n", static_cast<long long>(time(nullptr)), app.clockReady);
+    setStatus("Waiting for time sync", true);
+    setRefreshOverlay("", false);
+    return false;
+  }
+
   app.fetchInProgress = true;
   resetEvents();
   setStatus("Syncing calendar", true);
 
   String nextCursor;
+  nextCursor.reserve(32);
   bool hasMore = false;
   int pageCount = 0;
 
@@ -599,8 +687,6 @@ bool fetchAgendaWindow() {
     if (nextCursor.length() > 0) {
       url += "&cursor=" + urlEncode(nextCursor);
     }
-
-    Serial.println("GET " + url);
 
     WiFiClientSecure client;
     client.setCACert(APP_DAEMON_CA_CERT);
@@ -618,9 +704,10 @@ bool fetchAgendaWindow() {
     http.addHeader("Authorization", String("Bearer ") + APP_API_TOKEN);
 
     const int httpCode = http.GET();
+    Serial.printf("Events GET status: %d\n", httpCode);
     if (httpCode != HTTP_CODE_OK) {
       String errorText = http.errorToString(httpCode);
-      Serial.printf("Fetch failed code=%d error=%s\n", httpCode, errorText.c_str());
+      Serial.printf("Events GET error: %s\n", errorText.c_str());
       http.end();
       setStatus("Fetch failed: " + errorText, true);
       setRefreshOverlay("", false);
@@ -629,11 +716,11 @@ bool fetchAgendaWindow() {
     }
 
     String payload = http.getString();
-    http.end();
-
     DynamicJsonDocument doc(12288);
     DeserializationError error = deserializeJson(doc, payload);
+    http.end();
     if (error) {
+      Serial.printf("JSON parse error: %s\n", error.c_str());
       setStatus("Bad daemon response", true);
       setRefreshOverlay("", false);
       app.fetchInProgress = false;
@@ -675,6 +762,13 @@ bool triggerDaemonRefresh() {
     return false;
   }
 
+  if (!app.clockReady || !isClockValid(time(nullptr))) {
+    Serial.printf("Refresh blocked, invalid clock: %lld clockReady=%d\n", static_cast<long long>(time(nullptr)), app.clockReady);
+    setStatus("Waiting for time sync", true);
+    setRefreshOverlay("", false);
+    return false;
+  }
+
   WiFiClientSecure client;
   client.setCACert(APP_DAEMON_CA_CERT);
   HTTPClient http;
@@ -682,7 +776,6 @@ bool triggerDaemonRefresh() {
   http.setTimeout(20000);
 
   const String url = daemonBaseUrl() + "/v1/refresh";
-  Serial.println("POST " + url);
   if (!http.begin(client, url)) {
     setStatus("Refresh setup failed", true);
     setRefreshOverlay("", false);
@@ -691,9 +784,10 @@ bool triggerDaemonRefresh() {
 
   http.addHeader("Authorization", String("Bearer ") + APP_API_TOKEN);
   const int httpCode = http.POST("");
+  Serial.printf("Refresh POST status: %d\n", httpCode);
   if (httpCode != HTTP_CODE_OK) {
     const String errorText = http.errorToString(httpCode);
-    Serial.printf("Refresh failed code=%d error=%s\n", httpCode, errorText.c_str());
+    Serial.printf("Refresh POST error: %s\n", errorText.c_str());
     http.end();
     setStatus("Refresh failed: " + errorText, true);
     setRefreshOverlay("", false);
@@ -861,7 +955,18 @@ void rebuildAgenda(bool preserveView = false) {
 
 void updateRelativeTimesIfNeeded() {
   const time_t now = time(nullptr);
-  if (now < 1700000000) {
+  if (!isClockValid(now)) {
+    app.clockReady = false;
+    return;
+  }
+
+  if (!app.clockReady) {
+    app.clockReady = true;
+    app.rangeStart = startOfLocalDay(now);
+    app.rangeEnd = app.rangeStart + (APP_QUERY_DAYS * 24 * 60 * 60);
+    app.lastRenderMinuteTs = now - (now % 60);
+    app.refreshRequested = true;
+    rebuildAgenda(true);
     return;
   }
 
@@ -871,10 +976,6 @@ void updateRelativeTimesIfNeeded() {
     app.rangeEnd = app.rangeStart + (APP_QUERY_DAYS * 24 * 60 * 60);
     app.refreshRequested = true;
     rebuildAgenda(true);
-  }
-
-  if (app.eventCount == 0) {
-    return;
   }
 
   const time_t currentMinuteTs = now - (now % 60);
@@ -1003,16 +1104,22 @@ void connectWifi() {
     return;
   }
 
-  configTzTime(APP_TIMEZONE, "pool.ntp.org", "time.nist.gov");
+  Serial.printf("Wi-Fi connected, IP=%s\n", WiFi.localIP().toString().c_str());
+
+  bootstrapClockFromBuildTime();
+
+  requestTimeSync();
 
   const unsigned long clockStartedAt = millis();
   time_t now = time(nullptr);
-  while (now < 1700000000 && millis() - clockStartedAt < 10000) {
+  while (!isClockValid(now) && millis() - clockStartedAt < 10000) {
     delay(200);
     now = time(nullptr);
   }
 
-  app.clockReady = now >= 1700000000;
+  Serial.printf("Clock after SNTP wait: %lld\n", static_cast<long long>(now));
+
+  app.clockReady = isClockValid(now);
   app.rangeStart = startOfLocalDay(app.clockReady ? now : time(nullptr));
   app.rangeEnd = app.rangeStart + (APP_QUERY_DAYS * 24 * 60 * 60);
   setStatus(app.clockReady ? "Syncing calendar" : "Wi-Fi ready, no NTP", true);
@@ -1047,12 +1154,21 @@ void refreshIfNeeded() {
   }
 
   const time_t now = time(nullptr);
-  if (!app.clockReady && now >= 1700000000) {
+  if (!isClockValid(now)) {
+    app.clockReady = false;
+    if (millis() - app.lastClockSyncAttemptMs > APP_NTP_RETRY_INTERVAL_MS) {
+      requestTimeSync();
+    }
+    setStatus("Waiting for time sync", true);
+    setRefreshOverlay("", false);
+    return;
+  }
+
+  if (!app.clockReady) {
     app.clockReady = true;
     app.rangeStart = startOfLocalDay(now);
     app.rangeEnd = app.rangeStart + (APP_QUERY_DAYS * 24 * 60 * 60);
     app.refreshRequested = true;
-    Serial.printf("Clock synchronized at %lld\n", static_cast<long long>(now));
   }
 
   const bool stale = millis() - app.lastRefreshMs > APP_REFRESH_INTERVAL_MS;
